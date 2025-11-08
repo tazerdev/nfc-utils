@@ -38,7 +38,7 @@ As set of tools used for working with audio files and the results files of Night
 * Align recordings to nearest time unit (e.g., start recording at the top of the hour when recording in 60 minute intervals)
 * Allow custom filename patterns
 
-### Features
+### Enhancements
 
 * Ability to record for different durations for different protocols (e.g., diurnal, nocturnal, nfc)
 * Record in FLAC format
