@@ -1,6 +1,6 @@
 # NFC Utils
 
-As set of Python-based tools used for working with audio files and the results files of Nighthawk and BirdNET analysis engines.
+As set of Python-based tools used for working with audio files and the results files of Nighthawk and BirdNET analysis engines. These tools aim for compatibility across Windows, GNU/Linux, and MacOS.
 
 ## Listing Utility
 
