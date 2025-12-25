@@ -248,7 +248,7 @@ def extract_channel(twf, infile, channel=0, debug=False, quiet=False):
                             i += bpb
 
                         o.write(out_chunk)
-                        out_chunk = bytearray()
+                        out_chunk.clear()
 
                         if not quiet:
                             print(f"Splitting channel {channel} from {infile}: {(f.tell() / dce)*100:3.2f}%", end='\r', flush=True)
