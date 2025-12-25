@@ -269,7 +269,7 @@ def main():
     if os.path.exists(args.input):
         twf = TWAVFile(args.input)
 
-        if args.metadata:
+        if args.metadata or args.debug:
             print(twf)
         else:
             if args.channel <= twf.metadata['fmt']['Channels']-1:
