@@ -255,7 +255,6 @@ def extract_channel(twf, infile, channel=0, debug=False, quiet=False):
 
                         if f.tell() >= dce:
                             break
-            
             print()
         else:
             print(f"Destination file exists, please remove and try again: {outfile}")
