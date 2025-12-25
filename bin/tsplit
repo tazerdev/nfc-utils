@@ -1,0 +1,284 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import json
+import struct
+import signal
+import argparse
+
+class TWAVFile:
+    def __init__(self, filename, debug=False):
+        self.metadata = {}
+        self._filename = filename
+        self._debug = debug
+
+        self.metadata['File Name'] = os.path.basename(self._filename)
+        self.riff_hdr_sz = 12
+
+        if os.path.exists(self._filename):
+            self._read_header()
+
+    def _get_chunk(self, fp):
+        chunk = []
+        data = fp.read(8)
+
+        if len(data) == 8:
+            chunk_id = data[0:4].decode()
+            chunk_sz = int.from_bytes(data[4:8], byteorder='little')
+
+            # if chunk_sz is odd, then we need to add 1 to account
+            # for the null padding byte
+            chunk_sz += chunk_sz % 2
+            chunk = [ chunk_id, chunk_sz ]
+
+        return chunk
+
+    def _read_header(self):
+        try:
+            with open(self._filename, 'rb') as f:
+                data = f.read(self.riff_hdr_sz)
+
+                self.metadata['Actual Size'] = os.stat(self._filename).st_size
+                self.metadata['File Type'] = data[0:4].decode()
+                self.metadata['Reported Size'] = int.from_bytes(data[4:8], byteorder='little') + 8
+                self.metadata['Format'] = data[8:12].decode()
+
+                if self.metadata['File Type'] == 'RIFF' and self.metadata['Format'] == 'WAVE':
+                    cur_chunk = self._get_chunk(f)
+
+                    while cur_chunk:
+                        if cur_chunk[1] > 0:
+                            if cur_chunk[0] == 'fmt ':
+                                data = f.read(cur_chunk[1])
+
+                                self.metadata['fmt'] = {}
+
+                                if self._debug:
+                                    self.metadata['fmt']['Chunk Name'] = cur_chunk[0]
+                                    self.metadata['fmt']['Chunk Size'] = cur_chunk[1]
+        
+                                self.metadata['fmt']['Format'] = int.from_bytes(data[0:2], byteorder='little')
+                                self.metadata['fmt']['Channels'] = int.from_bytes(data[2:4], byteorder='little')
+                                self.metadata['fmt']['Frequency'] = int.from_bytes(data[4:8], byteorder='little')
+                                self.metadata['fmt']['Bytes/sec'] = int.from_bytes(data[8:12], byteorder='little')
+                                self.metadata['fmt']['Bytes/blc'] = int.from_bytes(data[12:14], byteorder='little')
+                                self.metadata['fmt']['Bits/smp'] = int.from_bytes(data[14:16], byteorder='little')
+                            elif cur_chunk[0] == 'guan':
+                                data = f.read(cur_chunk[1])
+                                self.metadata['guan'] = {}
+                                
+                                self.metadata['guan']['Chunk Name'] = cur_chunk[0]
+                                self.metadata['guan']['Chunk Size'] = cur_chunk[1]
+                            elif cur_chunk[0] == 'data':
+                                # don't need to read the entire data chunk into memory
+                                # as it may be very large
+                                offset = f.tell()
+                                f.seek(cur_chunk[1], 1)
+
+                                self.metadata['data'] = {}
+                                self.metadata['data']['Offset'] = offset
+
+                                if self._debug:
+                                    self.metadata['data']['Chunk Name'] = cur_chunk[0]
+    
+                                self.metadata['data']['Chunk Size'] = cur_chunk[1]
+                            elif cur_chunk[0] == 'bext':
+                                data = f.read(cur_chunk[1])
+
+                                bext_date = data[320:330].decode()
+                                bext_time = data[330:338].decode()
+
+                                self.metadata['bext'] = {}
+
+                                if self._debug:
+                                    self.metadata['bext']['Chunk Name'] = cur_chunk[0]
+                                    self.metadata['bext']['Chunk Size'] = cur_chunk[1]
+        
+                                self.metadata['bext']['Originator'] = data[256:287].decode().split('\x00')[0]
+                                self.metadata['bext']['Originator Date'] = data[320:330].decode().split('\x00')[0]
+                                self.metadata['bext']['Originator Time'] = data[330:338].decode().split('\x00')[0]
+                                self.metadata['bext']['End Time'] = f'{bext_date} {bext_time}'
+                            elif cur_chunk[0] == 'cue ':
+                                data = f.read(cur_chunk[1])
+                                self.metadata['cue'] = {}
+
+                                self.metadata['cue ']['Chunk Name'] = cur_chunk[0]
+                                self.metadata['cue ']['Chunk Size'] = cur_chunk[1]
+                            elif cur_chunk[0] == 'LIST':
+                                data = f.read(cur_chunk[1])
+                                fp = 0
+
+                                self.metadata['LIST'] = {}
+
+                                self.metadata['LIST']['Chunk Name'] = cur_chunk[0]
+                                self.metadata['LIST']['Chunk Size'] = cur_chunk[1]
+                                
+                                if data[fp:fp+4].decode() == 'INFO':
+                                    self.metadata['LIST']['INFO'] = {}
+                                    fp += 4
+
+                                    while fp < cur_chunk[1]:
+
+                                        cur_name = data[fp:fp+4].decode()
+                                        cur_size = int.from_bytes(data[fp+4:fp+8], byteorder='little')
+                                        cur_data = data[fp+8:fp+8+cur_size].decode()
+
+                                        self.metadata['LIST']['INFO'][cur_name] = {}
+
+                                        self.metadata['LIST']['INFO'][cur_name]['Chunk Name'] = cur_name
+                                        self.metadata['LIST']['INFO'][cur_name]['Chunk Size'] = cur_size
+        
+                                        self.metadata['LIST']['INFO'][cur_name]['Chunk Data'] = cur_data.split('\x00')[0]
+
+                                        fp += cur_size + 8
+                            elif cur_chunk[0] == 'wamd':
+                                data = f.read(cur_chunk[1])
+
+                                self.metadata['wamd'] = {}
+
+                                self.metadata['wamd']['Chunk Name'] = cur_chunk[0]
+                                self.metadata['wamd']['Chunk Size'] = cur_chunk[1]
+                            elif cur_chunk[0] == 'id3 ':
+                                data = f.read(cur_chunk[1])
+
+                                self.metadata['id3'] = {}
+                                
+                                if self._debug:
+                                    self.metadata['id3']['Chunk Name'] = cur_chunk[0]
+                                    self.metadata['id3']['Chunk Size'] = cur_chunk[1]
+                            elif cur_chunk[0] == 'iXML ':
+                                data = f.read(cur_chunk[1])
+
+                                self.metadata['iXML'] = {}
+
+                                if self._debug:
+                                    self.metadata['iXML']['Chunk Name'] = cur_chunk[0]
+                                    self.metadata['iXML']['Chunk Size'] = cur_chunk[1]
+                            else:
+                                f.seek(cur_chunk[1], 1)
+
+                            cur_chunk = self._get_chunk(f)
+                        else:
+                            print(f'Warning {cur_chunk[0]} chunk with a size of 0 detected in {self.metadata["File Name"]}')
+
+                            # TODO: Handle this better as cur_chunk[0] may be binary data and thus unsafe
+                            self.metadata[cur_chunk[0]] = {}
+                            self.metadata[cur_chunk[0]]['Chunk Size'] = cur_chunk[1]
+                            break
+
+                self.metadata['Duration'] = self.metadata['data']['Chunk Size'] / self.metadata['fmt']['Bytes/sec']
+        except FileNotFoundError:
+            print(f"Error: File '{self._filename}' not found.")
+        except Exception as e:
+            print(f"An error occurred: {e}")
+
+    def __str__(self):
+        return json.dumps(self.metadata, indent=4, sort_keys=True)
+
+    def to_dict(self):
+        return {
+            "File name": self.file_name
+        }
+
+
+def signal_handler(signum, frame):
+    signal.signal(signum, signal.SIG_IGN)
+    sys.exit(0)
+
+def ParseCommandLineArguments():
+    arg_parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="tsplit is a utility for extracting one channel from a WAV file.")
+    arg_parser.add_argument('-i', '--input', type=str, required=True, help="Path to the wave file to split.")
+    arg_parser.add_argument('-c', '--channel', type=int, default=0, help="In stereo files, left is 0, right is 1.")
+    arg_parser.add_argument('-d', '--debug', action='store_true', help='Print extra debugging information.')
+    arg_parser.add_argument('-q', '--quiet', action='store_true', help="Don't display progress indicator.")
+    arg_parser.add_argument('-m', '--metadata', action='store_true', help="Don't split, just display WAV metadata is JSON format.")
+
+    return arg_parser
+
+def extract_channel(twf, infile, channel=0, debug=False, quiet=False):
+        dest_path, filename = os.path.split(infile)
+        filename, extension = os.path.splitext(filename)
+        outfile = os.path.join(dest_path, str(filename) + f"-{channel}" + f"{extension}")
+
+        if not os.path.exists(outfile):
+            header  = struct.pack('4s', b'RIFF')
+            header += struct.pack('<l', twf.metadata['Reported Size'])
+            header += struct.pack('4s', b'WAVE')
+            header += struct.pack('4s', b'fmt ')
+            header += struct.pack('<l', 16)
+            header += struct.pack('<h', twf.metadata['fmt']['Format'])
+            header += struct.pack('<h', 1)
+            header += struct.pack('<l', twf.metadata['fmt']['Frequency'])
+            header += struct.pack('<l', int(twf.metadata['fmt']['Bytes/sec'] / twf.metadata['fmt']['Channels']))
+            header += struct.pack('<h', int(twf.metadata['fmt']['Bytes/blc'] / twf.metadata['fmt']['Channels']))
+            header += struct.pack('<h', twf.metadata['fmt']['Bits/smp'])
+            header += struct.pack('4s', b'data')
+            header += struct.pack('<l', int(twf.metadata['data']['Chunk Size'] / twf.metadata['fmt']['Channels']))
+
+            # bytes per wav block
+            bpb = twf.metadata['fmt']['Bytes/blc']
+
+            # bytes per channel
+            bpc = int(bpb / twf.metadata['fmt']['Channels'])
+
+            # data chunk end
+            dce = twf.metadata['data']['Chunk Size'] + twf.metadata['data']['Offset']
+
+            out_chunk = bytearray()
+
+            # this ensures we have a block size aligned with the WAV data block size
+            BLOCK_SIZE = 65536 * bpb
+
+            if debug:
+                print(f"bpb: {bpb}, bpc: {bpc}, dce: {dce}, BLOCK_SIZE: {BLOCK_SIZE}")
+
+            with open(infile, 'rb') as f:
+                with open(outfile, 'wb') as o:
+                    o.write(header)
+                    f.seek(twf.metadata['data']['Offset'])
+
+                    while True:
+                        in_chunk = f.read(BLOCK_SIZE)
+
+                        i = channel * bpc
+
+                        while i < BLOCK_SIZE:
+                            out_chunk += (in_chunk[i:i+bpc])
+                            i += bpb
+
+                        o.write(out_chunk)
+                        out_chunk = bytearray()
+
+                        if not quiet:
+                            print(f"Splitting channel {channel} from {infile}: {(f.tell() / dce)*100:3.2f}%", end='\r', flush=True)
+
+                        if f.tell() >= dce:
+                            break
+            
+            print()
+        else:
+            print(f"Destination file exists, please remove and try again: {outfile}")
+
+def main():
+    arg_parser = ParseCommandLineArguments()
+    args = arg_parser.parse_args()
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    if os.path.exists(args.input):
+        twf = TWAVFile(args.input)
+
+        if args.metadata:
+            print(twf)
+        else:
+            if args.channel <= twf.metadata['fmt']['Channels']-1:
+                extract_channel(twf, args.input, args.channel, args.debug, args.quiet)
+            else:
+                print(f"Specified channel exceeds number of channels in WAV file.")
+    else:
+        print(f"Input file does not exist.")
+
+
+if __name__ == "__main__":
+    main()
