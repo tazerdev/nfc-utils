@@ -6,181 +6,337 @@ import json
 import struct
 import signal
 import argparse
+from zoneinfo import ZoneInfo
+from datetime import datetime as dt
 
-class TWAVFile:
-    def __init__(self, filename, debug=False):
+class TalonWAVFile:
+    def __init__(self, filename, section=None, taxonomy=None, clear=False, debug=False):
         self.metadata = {}
         self._filename = filename
+        self._section = section
+        self.metadata['section'] = {}
+        self.metadata['name'] = os.path.basename(self._filename)
+        self.metadata['events'] = []
+
+        self._taxonomy = taxonomy
+
+        self._guano = None
         self._debug = debug
 
-        self.metadata['File Name'] = os.path.basename(self._filename)
-        self.riff_hdr_sz = 12
+        if self._section:
+            self._curtz = ZoneInfo(self._section['timezone'])
+            self._timestamp = dt.strptime(str(os.path.basename(self._filename)), self._section['file_format'])
+            self._timestamp.astimezone(self._curtz)
+
+            for key in section:
+                self.metadata['section'][key] = section[key]
 
         if os.path.exists(self._filename):
-            self._read_header()
+            self.metadata['st_mtime'] = dt.fromtimestamp(os.stat(self._filename).st_mtime)
+            self._parse_chunks()
 
     def _get_chunk(self, fp):
         chunk = []
+        chunk_offset = fp.tell()
         data = fp.read(8)
 
         if len(data) == 8:
             chunk_id = data[0:4].decode()
-            chunk_sz = int.from_bytes(data[4:8], byteorder='little')
+            chunk_sz = chunk_sz_orig = int.from_bytes(data[4:8], byteorder='little')
 
-            # if chunk_sz is odd, then we need to add 1 to account
-            # for the null padding byte
-            chunk_sz += chunk_sz % 2
-            chunk = [ chunk_id, chunk_sz ]
+            # adjust chunk size if chunk size is odd, as there should be a padding byte
+            if chunk_sz % 2 > 0:
+                chunk_sz += chunk_sz % 2
+
+            chunk = [ chunk_id, chunk_sz, chunk_offset, chunk_sz_orig % 2 ]
 
         return chunk
 
-    def _read_header(self):
+    def _json_serializer(self, obj):
+        # keep datetimes natively in the dict, but auto convert them
+        # to iso formatted datetimes for printing or json dumping
+        if isinstance(obj, (dt)):
+            return obj.isoformat()
+
+        # any byte strings we get from the various chunks will be non-
+        # printable, so convert them to hex in a format similar to xxd
+        if isinstance(obj, (bytes)):
+            return obj.hex(' ', 2)
+
+        raise TypeError ("Type %s not serializable" % type(obj))
+
+    def _parse_chunks(self):
         try:
             with open(self._filename, 'rb') as f:
-                data = f.read(self.riff_hdr_sz)
+                # this is the order in which chunks were found, so we can 
+                # reconstruct the file in the correct order
+                order = 0
+                self.metadata['st_size'] = 0
+                self.metadata['duration'] = 0
+                self.metadata['chunks'] = {}
+                riff_id, riff_sz, chunk_offset, padding = self._get_chunk(f)
 
-                self.metadata['Actual Size'] = os.stat(self._filename).st_size
-                self.metadata['File Type'] = data[0:4].decode()
-                self.metadata['Reported Size'] = int.from_bytes(data[4:8], byteorder='little') + 8
-                self.metadata['Format'] = data[8:12].decode()
+                if riff_id == 'RIFF':
+                    riff = {}
+                    riff['name'] = riff_id
+                    riff['size'] = riff_sz
+                    riff['offset'] = 0
+                    riff['wavid'] = f.read(4).decode()
+                    riff['order'] = order
 
-                if self.metadata['File Type'] == 'RIFF' and self.metadata['Format'] == 'WAVE':
-                    cur_chunk = self._get_chunk(f)
+                    self.metadata['chunks']['riff'] = riff
+                    # self.metadata['type'] = 'RIFF'
+                    # self.metadata['format'] = 'WAVE'
+                    self.metadata['st_size'] = os.stat(self._filename).st_size
 
-                    while cur_chunk:
-                        if cur_chunk[1] > 0:
-                            if cur_chunk[0] == 'fmt ':
-                                data = f.read(cur_chunk[1])
+                    if riff['wavid'] == 'WAVE':
+                        while True:
+                            order += 1
+                            offset = f.tell()
 
-                                self.metadata['fmt'] = {}
+                            if offset >= self.metadata['st_size']:
+                                break
 
-                                if self._debug:
-                                    self.metadata['fmt']['Chunk Name'] = cur_chunk[0]
-                                    self.metadata['fmt']['Chunk Size'] = cur_chunk[1]
-        
-                                self.metadata['fmt']['Format'] = int.from_bytes(data[0:2], byteorder='little')
-                                self.metadata['fmt']['Channels'] = int.from_bytes(data[2:4], byteorder='little')
-                                self.metadata['fmt']['Frequency'] = int.from_bytes(data[4:8], byteorder='little')
-                                self.metadata['fmt']['Bytes/sec'] = int.from_bytes(data[8:12], byteorder='little')
-                                self.metadata['fmt']['Bytes/blc'] = int.from_bytes(data[12:14], byteorder='little')
-                                self.metadata['fmt']['Bits/smp'] = int.from_bytes(data[14:16], byteorder='little')
-                            elif cur_chunk[0] == 'guan':
-                                data = f.read(cur_chunk[1])
-                                self.metadata['guan'] = {}
-                                
-                                self.metadata['guan']['Chunk Name'] = cur_chunk[0]
-                                self.metadata['guan']['Chunk Size'] = cur_chunk[1]
-                            elif cur_chunk[0] == 'data':
-                                # don't need to read the entire data chunk into memory
-                                # as it may be very large
-                                offset = f.tell()
-                                f.seek(cur_chunk[1], 1)
+                            chunk_id, chunk_sz, chunk_offset, padding = self._get_chunk(f)
 
-                                self.metadata['data'] = {}
-                                self.metadata['data']['Offset'] = offset
+                            if chunk_id:
+                                chunk = {}
 
-                                if self._debug:
-                                    self.metadata['data']['Chunk Name'] = cur_chunk[0]
-    
-                                self.metadata['data']['Chunk Size'] = cur_chunk[1]
-                            elif cur_chunk[0] == 'bext':
-                                data = f.read(cur_chunk[1])
+                                chunk['name'] = chunk_id
+                                chunk['offset'] = chunk_offset
+                                chunk['size'] = chunk_sz
+                                chunk['padding'] = padding
+                                chunk['order'] = order
 
-                                bext_date = data[320:330].decode()
-                                bext_time = data[330:338].decode()
+                                if chunk_id == 'fmt ':
+                                    data = f.read(chunk_sz)
 
-                                self.metadata['bext'] = {}
+                                    # format 1 is PCM, format 3 is IEEE Float
+                                    chunk['format'] = int.from_bytes(data[0:2], byteorder='little')
+                                    chunk['channels'] = int.from_bytes(data[2:4], byteorder='little')
+                                    chunk['samples_sec'] = int.from_bytes(data[4:8], byteorder='little')
+                                    chunk['bytes_sec'] = int.from_bytes(data[8:12], byteorder='little')
+                                    chunk['block_size'] = int.from_bytes(data[12:14], byteorder='little')
+                                    chunk['bit_depth'] = int.from_bytes(data[14:16], byteorder='little')
 
-                                if self._debug:
-                                    self.metadata['bext']['Chunk Name'] = cur_chunk[0]
-                                    self.metadata['bext']['Chunk Size'] = cur_chunk[1]
-        
-                                self.metadata['bext']['Originator'] = data[256:287].decode().split('\x00')[0]
-                                self.metadata['bext']['Originator Date'] = data[320:330].decode().split('\x00')[0]
-                                self.metadata['bext']['Originator Time'] = data[330:338].decode().split('\x00')[0]
-                                self.metadata['bext']['End Time'] = f'{bext_date} {bext_time}'
-                            elif cur_chunk[0] == 'cue ':
-                                data = f.read(cur_chunk[1])
-                                self.metadata['cue'] = {}
+                                    ext_size = int.from_bytes(data[16:18], byteorder='little')
+                                    chunk['ext_size'] = ext_size
+                                    chunk['ext_data'] = data[18:18+ext_size] #.hex(' ', 2)
+                                elif chunk_id == 'guan':
+                                    data = f.read(chunk_sz)
 
-                                self.metadata['cue ']['Chunk Name'] = cur_chunk[0]
-                                self.metadata['cue ']['Chunk Size'] = cur_chunk[1]
-                            elif cur_chunk[0] == 'LIST':
-                                data = f.read(cur_chunk[1])
-                                fp = 0
+                                    chunk['data'] = TalonWAVFile.decode_guano(data)
+                                    chunk['offset'] = chunk_offset
+                                    chunk['size'] = chunk_sz
+                                elif chunk_id == 'data':
+                                    # don't need to read the entire data chunk into memory as it may be very large, 
+                                    # just record the size and skip to the next chunk
+                                    f.seek(chunk_sz, 1)
+                                else:
+                                    chunk['data'] = f.read(chunk_sz)
 
-                                self.metadata['LIST'] = {}
-
-                                self.metadata['LIST']['Chunk Name'] = cur_chunk[0]
-                                self.metadata['LIST']['Chunk Size'] = cur_chunk[1]
-                                
-                                if data[fp:fp+4].decode() == 'INFO':
-                                    self.metadata['LIST']['INFO'] = {}
-                                    fp += 4
-
-                                    while fp < cur_chunk[1]:
-
-                                        cur_name = data[fp:fp+4].decode()
-                                        cur_size = int.from_bytes(data[fp+4:fp+8], byteorder='little')
-                                        cur_data = data[fp+8:fp+8+cur_size].decode()
-
-                                        self.metadata['LIST']['INFO'][cur_name] = {}
-
-                                        self.metadata['LIST']['INFO'][cur_name]['Chunk Name'] = cur_name
-                                        self.metadata['LIST']['INFO'][cur_name]['Chunk Size'] = cur_size
-        
-                                        self.metadata['LIST']['INFO'][cur_name]['Chunk Data'] = cur_data.split('\x00')[0]
-
-                                        fp += cur_size + 8
-                            elif cur_chunk[0] == 'wamd':
-                                data = f.read(cur_chunk[1])
-
-                                self.metadata['wamd'] = {}
-
-                                self.metadata['wamd']['Chunk Name'] = cur_chunk[0]
-                                self.metadata['wamd']['Chunk Size'] = cur_chunk[1]
-                            elif cur_chunk[0] == 'id3 ':
-                                data = f.read(cur_chunk[1])
-
-                                self.metadata['id3'] = {}
-                                
-                                if self._debug:
-                                    self.metadata['id3']['Chunk Name'] = cur_chunk[0]
-                                    self.metadata['id3']['Chunk Size'] = cur_chunk[1]
-                            elif cur_chunk[0] == 'iXML ':
-                                data = f.read(cur_chunk[1])
-
-                                self.metadata['iXML'] = {}
-
-                                if self._debug:
-                                    self.metadata['iXML']['Chunk Name'] = cur_chunk[0]
-                                    self.metadata['iXML']['Chunk Size'] = cur_chunk[1]
+                                self.metadata['chunks'][chunk['name'].strip()] = chunk
                             else:
-                                f.seek(cur_chunk[1], 1)
-
-                            cur_chunk = self._get_chunk(f)
-                        else:
-                            print(f'Warning {cur_chunk[0]} chunk with a size of 0 detected in {self.metadata["File Name"]}')
-
-                            # TODO: Handle this better as cur_chunk[0] may be binary data and thus unsafe
-                            self.metadata[cur_chunk[0]] = {}
-                            self.metadata[cur_chunk[0]]['Chunk Size'] = cur_chunk[1]
-                            break
-
-                self.metadata['Duration'] = self.metadata['data']['Chunk Size'] / self.metadata['fmt']['Bytes/sec']
+                                break
+                else:
+                    print('Not a WAV file.')
         except FileNotFoundError:
             print(f"Error: File '{self._filename}' not found.")
         except Exception as e:
             print(f"An error occurred: {e}")
 
+    @property
+    def channels(self):
+        return self.metadata['chunks']['fmt']['channels']
+
+    @property
+    def rate(self):
+        return self.metadata['chunks']['fmt']['rate']
+
+    @property
+    def bits(self):
+        return self.metadata['chunks']['fmt']['bit_depth']
+
+    @property
+    def duration(self):
+        return self.metadata['chunks']['data']['size'] / self.metadata['chunks']['fmt']['bytes_sec']
+
+    def ExtractChannel(self, channel=0, quiet=False):
+        self._extract_channel(channel, quiet)
+
+    def _extract_channel(self, channel=0, quiet=False):
+        dest_path, filename = os.path.split(self._filename)
+        filename, extension = os.path.splitext(filename)
+        outfile = os.path.join(dest_path, str(filename) + f"-{channel}" + f"{extension}")
+
+        if not os.path.exists(outfile):
+            with open(outfile, 'wb') as o:
+                # python >= 3.7 maintains insertion order for dicts, so we can
+                # rely on ['chunks'] being in the proper order as we loop through
+                for cur in self.metadata['chunks']:
+                    chunk = self.metadata['chunks'][cur]
+
+                    # reinitialize header var for each chunk
+                    header = b''
+
+                    if chunk['name'] == 'RIFF':
+                        header += struct.pack('4s', chunk['name'].encode())
+                        header += struct.pack('<l', chunk['size'])
+                        header += struct.pack('4s', chunk['wavid'].encode())
+
+                        o.write(header)
+                    elif chunk['name'] == 'fmt ':
+                        # TODO: calculate sized based on the data we're packing
+                        header += struct.pack('4s', chunk['name'].encode())
+                        header += struct.pack('<l', chunk['size'])         # 4
+                        header += struct.pack('<H', chunk['format'])       # 2
+                        header += struct.pack('<H', 1)                     # 2
+                        header += struct.pack('<l', chunk['samples_sec'])  # 4
+                        header += struct.pack('<l', int(chunk['bytes_sec']/chunk['channels']))    # 4
+                        header += struct.pack('<H', int(chunk['block_size']/chunk['channels']))   # 2
+                        header += struct.pack('<H', chunk['bit_depth'])    # 2
+
+                        if chunk['ext_size'] > 0:
+                            header += struct.pack('<H', chunk['ext_size'])     # 2
+                            header += struct.pack(f"{len(chunk['ext_data'])}s", chunk['ext_data'])
+
+                        bpb = chunk['block_size']
+                        bpc = int(chunk['bit_depth'] / 8)
+
+                        o.write(header)
+                    elif chunk['name'] == 'data':
+                        # write data chunk name
+                        o.write(struct.pack('4s', chunk['name'].encode()))
+
+                        # write size of 0 for now, we'll update it later
+                        oldpos = o.tell()
+                        o.write(struct.pack('<l', 65536))
+
+                        # BLOCK_SIZE should be evenly divisible by bpb or bpc so that
+                        # when we grab the next chunk we're not starting in the middle
+                        # of block of channels
+                        BLOCK_SIZE = 65536 * bpb * 4
+
+                        # bytes per block
+                        bpb = self.metadata['chunks']['fmt']['block_size']
+
+                        # bytes per channel
+                        bpc = int(self.metadata['chunks']['fmt']['bit_depth'] / 8)
+                        out_chunk = bytearray()
+
+                        with open(self._filename, 'rb') as f:
+                            # offset is the beginning of the data block, the data portion
+                            # follows the 4-byte name and 4-byte size
+                            f.seek(self.metadata['chunks']['data']['offset'] + 8)
+
+                            remaining = chunk['size']
+                            complete = 0
+
+                            while True:
+                                if not quiet:
+                                    print(f"Splitting channel {channel} from {self._filename}: {(complete / chunk['size'])*100:3.2f}%", end='\r', flush=True)
+
+                                if not remaining > 0:
+                                    break
+
+                                if BLOCK_SIZE > remaining:
+                                    BLOCK_SIZE = remaining
+
+                                in_chunk = f.read(BLOCK_SIZE)
+                                i = channel * bpc
+
+                                while i < BLOCK_SIZE:
+                                    out_chunk += (in_chunk[i:i+bpc])
+                                    i += bpb
+
+                                o.write(out_chunk)
+                                out_chunk.clear()
+
+                                remaining -= BLOCK_SIZE
+                                complete += BLOCK_SIZE
+
+                        if not quiet:
+                            print()
+                        
+                        # record current position
+                        curpos = o.tell()
+
+                        # diff between old and cur is data size (-4 because oldpos is before the 4 byte size)
+                        data_size = curpos - oldpos - 4
+
+                        # rewind to old pos and write data size
+                        o.seek(oldpos)
+                        o.write(struct.pack('<l', data_size))
+
+                        # go back to curpos so we can write any
+                        # remaining chunks in the file
+                        o.seek(curpos)
+                    elif chunk['name'] == 'guan':
+                        header += struct.pack('4s', chunk['name'].encode())
+                        data = TalonWAVFile.encode_guano(chunk['data'])
+                        size = len(data)
+                        header += struct.pack('<l', size)
+                        header += struct.pack(f"{len(data)}s", data)
+
+                        o.write(header)
+                    else:
+                        header += struct.pack('4s', chunk['name'].encode())
+                        header += struct.pack('<l', chunk['size'])
+                        header += struct.pack(f"{len(chunk['data'])}s", chunk['data'])
+
+                        o.write(header)
+                
+                # RIFF size is total size of the file minus the 4-by chunk name (RIFF)
+                # and the 4 byte size.
+                riff_size = o.seek(0, 2) - 8
+
+                o.seek(4)
+                o.write(struct.pack('<l', riff_size))
+        else:
+            print(f"Destination file exists, please remove and try again: {outfile}")
+
     def __str__(self):
-        return json.dumps(self.metadata, indent=4, sort_keys=True)
+        return json.dumps(self.metadata, indent=4, sort_keys=False, default=self._json_serializer)
 
     def to_dict(self):
         return {
             "File name": self.file_name
         }
 
+    @staticmethod
+    def encode_guano(data):
+        output = ""
+
+        for key in data:
+            if not isinstance(data[key], dict):
+                output += f"{key}: {data[key]}\n"
+            else:
+                for k in data[key]:
+                    output += f"{key}|{k}: {data[key][k]}\n"
+
+        return output.encode()
+
+    @staticmethod
+    def decode_guano(data):
+        tmp = {}
+
+        # we can read the guano data ourselves now
+        for item in data.decode().split('\n'):
+            if len(item) > 0:
+                key, val = item.split(': ')
+
+                # parse namespaces as dicts
+                if '|' in key:
+                    key, subkey = key.split('|')
+
+                    if key not in tmp:
+                        tmp[key] = {}
+                    
+                    tmp[key][subkey] = val
+                else:
+                    tmp[key] = val
+
+        return tmp
 
 def signal_handler(signum, frame):
     signal.signal(signum, signal.SIG_IGN)
@@ -196,69 +352,6 @@ def ParseCommandLineArguments():
 
     return arg_parser
 
-def extract_channel(twf, infile, channel=0, debug=False, quiet=False):
-        dest_path, filename = os.path.split(infile)
-        filename, extension = os.path.splitext(filename)
-        outfile = os.path.join(dest_path, str(filename) + f"-{channel}" + f"{extension}")
-
-        if not os.path.exists(outfile):
-            header  = struct.pack('4s', b'RIFF')
-            header += struct.pack('<l', twf.metadata['Reported Size'])
-            header += struct.pack('4s', b'WAVE')
-            header += struct.pack('4s', b'fmt ')
-            header += struct.pack('<l', 16)
-            header += struct.pack('<h', twf.metadata['fmt']['Format'])
-            header += struct.pack('<h', 1)
-            header += struct.pack('<l', twf.metadata['fmt']['Frequency'])
-            header += struct.pack('<l', int(twf.metadata['fmt']['Bytes/sec'] / twf.metadata['fmt']['Channels']))
-            header += struct.pack('<h', int(twf.metadata['fmt']['Bytes/blc'] / twf.metadata['fmt']['Channels']))
-            header += struct.pack('<h', twf.metadata['fmt']['Bits/smp'])
-            header += struct.pack('4s', b'data')
-            header += struct.pack('<l', int(twf.metadata['data']['Chunk Size'] / twf.metadata['fmt']['Channels']))
-
-            # bytes per wav block
-            bpb = twf.metadata['fmt']['Bytes/blc']
-
-            # bytes per channel
-            bpc = int(bpb / twf.metadata['fmt']['Channels'])
-
-            # data chunk end
-            dce = twf.metadata['data']['Chunk Size'] + twf.metadata['data']['Offset']
-
-            out_chunk = bytearray()
-
-            # this ensures we have a block size aligned with the WAV data block size
-            BLOCK_SIZE = 65536 * bpb
-
-            if debug:
-                print(f"bpb: {bpb}, bpc: {bpc}, dce: {dce}, BLOCK_SIZE: {BLOCK_SIZE}")
-
-            with open(infile, 'rb') as f:
-                with open(outfile, 'wb') as o:
-                    o.write(header)
-                    f.seek(twf.metadata['data']['Offset'])
-
-                    while True:
-                        in_chunk = f.read(BLOCK_SIZE)
-
-                        i = channel * bpc
-
-                        while i < BLOCK_SIZE:
-                            out_chunk += (in_chunk[i:i+bpc])
-                            i += bpb
-
-                        o.write(out_chunk)
-                        out_chunk.clear()
-
-                        if not quiet:
-                            print(f"Splitting channel {channel} from {infile}: {(f.tell() / dce)*100:3.2f}%", end='\r', flush=True)
-
-                        if f.tell() >= dce:
-                            break
-            print()
-        else:
-            print(f"Destination file exists, please remove and try again: {outfile}")
-
 def main():
     arg_parser = ParseCommandLineArguments()
     args = arg_parser.parse_args()
@@ -266,13 +359,13 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     if os.path.exists(args.input):
-        twf = TWAVFile(args.input)
+        twf = TalonWAVFile(args.input)
 
         if args.metadata or args.debug:
             print(twf)
         else:
-            if args.channel <= twf.metadata['fmt']['Channels']-1:
-                extract_channel(twf, args.input, args.channel, args.debug, args.quiet)
+            if args.channel <= twf.metadata['chunks']['fmt']['channels']-1:
+                twf.ExtractChannel(channel=args.channel, quiet=args.quiet)
             else:
                 print(f"Specified channel exceeds number of channels in WAV file.")
     else:
