@@ -7,9 +7,6 @@ import signal
 import argparse
 from pathlib import Path
 
-from datetime import timedelta
-from datetime import datetime as dt
-
 class TalonWAVFile:
     def __init__(self, filename, debug=False):
         self.metadata = {}
