@@ -27,6 +27,8 @@ class TalonWAVFile:
         au_file = os.path.join(dest_path, str(filename) + au_ext)
 
         if self._debug:
+            print(f"Processing events for {self._filename}")
+
             for e in self.events:
                 print(f"{e['start']:0.2f}\t{e['stop']:0.2f}\t{e['common_name']} ({e['engine']} / {e['probability']:0.2f}%)")
         else:
@@ -124,6 +126,9 @@ def main():
 
     for f in file_list:
         TalonWAVFile(f, args.debug)
+
+        if args.debug:
+            print("")
 
 
 if __name__ == "__main__":
