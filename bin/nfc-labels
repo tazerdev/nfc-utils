@@ -104,10 +104,9 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 def ParseCommandLineArguments():
-    arg_parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="tsplit is a utility for extracting one channel from a WAV file.")
-    arg_parser.add_argument('-i', '--input', type=str, help="Path to the wave file to split.")
+    arg_parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="nfc-labels is a utility for generating Audacity labels from Nighthawk and BirdNET detection files.")
+    arg_parser.add_argument('-i', '--input', type=str, help="Path to a WAV file to generate labels from.")
     arg_parser.add_argument('-d', '--debug', action='store_true', help='Print extra debugging information.')
-    arg_parser.add_argument('-q', '--quiet', action='store_true', help="Don't display progress indicator.")
 
     return arg_parser
 
