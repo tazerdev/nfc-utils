@@ -103,7 +103,7 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 def ParseCommandLineArguments():
-    arg_parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, description="nfc-labels is a utility for generating Audacity labels from Nighthawk and BirdNET detection files.")
+    arg_parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, description="nfc-labels is a utility for generating Audacity labels from Nighthawk and BirdNET detection files. nfc-utils expects both Nighthawk and BirdNET detections files to be in their default formats with their default names.\n\nExample:\nA WAV file named mywav.wav would have a Nighthawk detctions file named 'mywav_detections.csv' and a BirdNET detections file named 'mywav.BirdNET.selection.table.txt'. The resulting Adaucity labels file will subsequently be named 'mywav_audacity.txt'")
     arg_parser.add_argument('-i', '--input', type=str, help="Path to a WAV file to generate labels from.")
     arg_parser.add_argument('-d', '--debug', action='store_true', help='Print extra debugging information.')
 
